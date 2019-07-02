@@ -6,6 +6,14 @@ import numpy as np
 from mlagents_envs import UnityEnvironment
 from gym import error, spaces
 import os
+import sys
+import time
+
+sys.path.append('/home/jordanyeomans/Dropbox/PyCharmProjects_DB/PhD/')
+import WorldModel.Env2_OpenAI.Rev3_HER_ObstacleTower.AE_Functions as AE_Functions
+import WorldModel.Env2_OpenAI.Rev3_HER_ObstacleTower.HelperFunctions as helper
+
+
 
 
 class UnityGymException(error.Error):
@@ -23,7 +31,8 @@ class ObstacleTowerEnv(gym.Env):
     ALLOWED_VERSIONS = ['1', '1.1', '1.2', '1.3']
 
     def __init__(self, environment_filename=None, docker_training=False, worker_id=0, retro=True,
-                 timeout_wait=30, realtime_mode=False):
+                 timeout_wait=30, realtime_mode=False, return_obs_encoding=False, return_raw_pixels=False,
+                 convert_from_ddpg=False):
         """
         Arguments:
           environment_filename: The file path to the Unity executable.  Does not require the extension.
@@ -35,6 +44,11 @@ class ObstacleTowerEnv(gym.Env):
           timeout_wait: Time for python interface to wait for environment to connect.
           realtime_mode: Whether to render the environment window image and run environment at realtime.
         """
+
+        self.return_obs_encoding = return_obs_encoding
+        self.return_raw_pixels = return_raw_pixels
+        self.convert_from_ddpg = convert_from_ddpg  # actions need to change signs to be fwd/left/right
+
         if self.is_grading():
             environment_filename = None
             docker_training = True
@@ -153,6 +167,7 @@ class ObstacleTowerEnv(gym.Env):
 
         info = self._env.reset(config=reset_params,
                                train_mode=not self.realtime_mode)[self.brain_name]
+
         n_agents = len(info.agents)
         self._check_agents(n_agents)
         self.game_over = False
@@ -174,6 +189,24 @@ class ObstacleTowerEnv(gym.Env):
             done (boolean/list): whether the episode has ended.
             info (dict): contains auxiliary diagnostic information, including BrainInfo.
         """
+
+        action_idx = np.argmax(action)
+        action = np.zeros_like(action)
+        action[action_idx] = 1
+
+        if self.convert_from_ddpg:
+            if np.argmax(action) == 0:  # Move FWD (w) - No change needed
+                pass
+
+            elif np.argmax(action) == 1:  # Turn Left (k) - No change needed
+                pass
+
+            elif np.argmax(action) == 2:  # Turn Right (l)
+                action = [0, 2, 0, 0]
+
+            elif np.argmax(action) == 3:  # Stay Still
+                action = [0, 0, 0, 0]
+
 
         # Use random actions for all other agents in environment.
         if self._flattener is not None:
@@ -206,9 +239,16 @@ class ObstacleTowerEnv(gym.Env):
             default_observation = self._prepare_tuple_observation(
                 self.visual_obs, info.vector_observations[0])
 
-        return default_observation, info.rewards[0], info.local_done[0], {
-            "text_observation": info.text_observations[0],
-            "brain_info": info}
+        if self.return_obs_encoding is True:
+            # TODO: Jordan get observation encoding
+            default_observation = default_observation[0]
+            default_observation, recon = AE_Functions.get_observation(default_observation)
+
+        if self.return_raw_pixels is True:
+            default_observation = self.visual_obs
+
+        return default_observation, info.rewards[0], info.local_done[0], {"text_observation": info.text_observations[0],
+                                                                          "brain_info": info}
 
     def _preprocess_single(self, single_visual_obs):
         if self.uint8_visual:
@@ -266,6 +306,25 @@ class ObstacleTowerEnv(gym.Env):
             )
         logger.warn("New starting floor " + str(floor) + " will apply on next reset.")
         self._floor = floor
+
+    def compute_reward(self, achieved_goal, desired_goal, info):
+        # TODO: Compute reward based on distance
+
+        # -0 for correct, -1 for incorrect
+        rewards = np.ones(achieved_goal.shape[0]) * -1
+
+        goal_recon = AE_Functions.get_multiple_recons(desired_goal)
+        achieved_recon = AE_Functions.get_multiple_recons(achieved_goal)
+
+        dist_thresh = helper.get_dist_thresh()
+
+        for i in range(achieved_goal.shape[0]):
+            distance = helper.cal_distance(desired_goal=goal_recon[i], current_pos=achieved_recon[i])
+            # print("Reward Distance = ", distance)
+            if distance < dist_thresh:
+                rewards[i] = -0
+
+        return rewards
 
     @staticmethod
     def _resize_observation(observation):
